@@ -56,3 +56,6 @@ mvn clean
 mvn compile
 mvn package
 ```
+
+## Deploy to GitHub Package
+To deploy a compiled package (jar) to the repository, follow [this guide](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-apache-maven-registry#authenticating-with-a-personal-access-token) for setting up your local Maven setting with a personal access token to authenticate to GitHub.

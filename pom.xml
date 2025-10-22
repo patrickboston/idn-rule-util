@@ -20,6 +20,14 @@
         </repository>
     </repositories>
 
+    <distributionManagement>
+        <repository>
+            <id>github</id>
+            <name>GitHub OWNER Apache Maven Packages</name>
+            <url>https://maven.pkg.github.com/ipllc/idn-rule-util</url>
+        </repository>
+    </distributionManagement>
+
     <dependencies>
         <dependency>
             <groupId>sailpoint</groupId>
@@ -32,6 +40,6 @@
             <version>8.5</version>
         </dependency>
     </dependencies>
-    
+
 
 </project>
