@@ -21,7 +21,6 @@ import sailpoint.api.SailPointContext;
 import sailpoint.connector.Connector;
 import sailpoint.connector.ConnectorException;
 import sailpoint.connector.ConnectorFactory;
-import sailpoint.object.SailPointObject;
 import sailpoint.object.ResourceObject;
 import sailpoint.object.Application;
 import sailpoint.object.Filter;
@@ -30,6 +29,7 @@ import sailpoint.object.Link;
 import sailpoint.object.ManagedAttribute;
 import sailpoint.object.QueryOptions;
 import sailpoint.tools.GeneralException;
+import sailpoint.rule.ManagedAttributeDetails;
 
 /**
  * IIQ-backed implementation of IIdnRuleUtil.
@@ -505,49 +505,6 @@ public class IdnRuleUtil implements IIdnRuleUtil {
     }
 
     private Account convertLinkToAccount(Link link) {
-        return new AccountImpl(link);
-    }
-
-    /**
-     * Simple Account implementation that wraps an IIQ Link.
-     */
-    private static class AccountImpl extends SailPointObject implements IIdnRuleUtil.Account {
-        private final Link link;
-
-        AccountImpl(Link link) {
-            this.link = link;
-        }
-
-        @Override
-        public String getNativeIdentity() {
-            return link.getNativeIdentity();
-        }
-
-        @Override
-        public String getDisplayableName() {
-            return link.getDisplayableName();
-        }
-
-        @Override
-        public Object getAttribute(String name) {
-            return link.getAttribute(name);
-        }
-
-        @Override
-        public Object getRawAttribute(String name) {
-            return link.getAttribute(name);
-        }
-
-        @Override
-        public String getApplicationName() {
-            Application app = link.getApplication();
-            return app != null ? app.getName() : null;
-        }
-
-        @Override
-        public String getIdentityName() {
-            Identity id = link.getIdentity();
-            return id != null ? id.getName() : null;
-        }
+        return new sailpoint.rule.Account(link);
     }
 }

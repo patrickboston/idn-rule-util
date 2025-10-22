@@ -1,4 +1,4 @@
-package sailpoint.server;
+package sailpoint.rule;
 
 import java.util.HashMap;
 import java.util.Map;

@@ -2,6 +2,7 @@ package sailpoint.server;
 
 import java.util.List;
 
+import sailpoint.rule.ManagedAttributeDetails;
 import sailpoint.tools.GeneralException;
 
 /**
