@@ -25,13 +25,24 @@ IdnRuleUtil idn = new IdnRuleUtil(context);
 idn.countAccounts("HR [source]");
 ```
 
+## Cleanup before ISC deployment
+After you have developed and tested your rule in IdentityIQ and are ready to submit it for SailPoint ISC review, you will need to make sure you remove the `sailpoint.server.IdnRuleUtil` class import and `IdnRuleUtil` object declaration. **SailPoint's Cloud Rule validator does not appear to pick this up an un-allowed class, but your rule will either be declined during review or will throw errors when deployed, so make sure you perform this clean up. Additionally, make sure you convert any IIQ rule types to ISC rule types per the next section.**
+
+## Rule Types
+ISC contains a couple of rule types which do not exist in IdentityIQ. Depending on how you create the IIQ rules, you may need to convert them to the equivalent ISC rule type before deployment. You could however just set the rule types in IIQ to the ISC rule type, it will not affect how they run. Here are the equivalent rule types (IIQ to ISC):
+- FieldValue - AttributeGenerator
+- FieldValue - AttributeGeneratorFromTemplate
+
+There is no equivalent of a `Transform` rule type in IIQ.
+
+
 
 
 # Contribution
 To contribute to this project, see below sections.
 
 ## Local Dependencies
-This was developed using local Maven dependencies since IdentityIQ libraries are obviously not public. If you wish to work on this, you can add them by running these commands:
+This was developed using local Maven dependencies since IdentityIQ libraries are obviously not public. If you wish to work on this, you can add them by running these commands in your local project/workspace:
 ```
 mvn deploy:deploy-file -DgroupId=sailpoint -DartifactId=connector-bundle-identityiq -Dversion=8.5 -Durl=file:./local-maven-repo/ -DrepositoryId=local-maven-repo -DupdateReleaseInfo=true -Dfile=<your-iiq-path>/WEB-INF/lib/identityiq.jar
 
