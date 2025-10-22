@@ -7,7 +7,7 @@ This library is meant to be used with IdentityIQ sandboxes where you can create 
 In order to use this library, you must have an IdentityIQ environment where the jar file can be deployed.
 
 ## Add to classpath
-1. Download the latest version of the library (`idn-rule-util.jar`) from the **Releases** section of the GitHub repository
+1. Download the latest version of the library (`idn-rule-util.jar`) from the **Packages** section of the GitHub repository
 2. Place the jar file in `<identityiq-home>/WEB-INF/lib` (or build place in SSB directory and re-deploy fresh WAR)
 3. Restart your application server
 
