@@ -1,13 +1,17 @@
 package sailpoint.server;
 
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Collections;
+import java.util.Collection;
+import java.util.Date;
+import java.util.HashMap;
 import java.util.Hashtable;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.TimeZone;
 
 import javax.naming.Context;
 import javax.naming.NamingEnumeration;
@@ -19,29 +23,66 @@ import javax.naming.directory.SearchResult;
 
 import sailpoint.api.SailPointContext;
 import sailpoint.connector.Connector;
-import sailpoint.connector.ConnectorException;
 import sailpoint.connector.ConnectorFactory;
-import sailpoint.object.ResourceObject;
+import sailpoint.connector.ObjectNotFoundException;
 import sailpoint.object.Application;
 import sailpoint.object.Filter;
-import sailpoint.object.Identity;
 import sailpoint.object.Link;
 import sailpoint.object.ManagedAttribute;
 import sailpoint.object.QueryOptions;
-import sailpoint.tools.GeneralException;
+import sailpoint.rule.Account;
+import sailpoint.rule.Identity;
 import sailpoint.rule.ManagedAttributeDetails;
+import sailpoint.tools.GeneralException;
 
 /**
- * IIQ-backed implementation of IIdnRuleUtil.
+ * IIQ-backed implementation of the ISC {@code sailpoint.server.IdnRuleUtil}
+ * API, for testing ISC cloud rules in an IdentityIQ sandbox.
  *
- * NOTE / Design choices:
- * - We map IDN Account -> AccountImpl which wraps an IIQ Link.
- * - Some IDN-specific behaviors (e.g. searchable account attributes across
- * sources, connector getObject)
- * are approximated with IIQ Link queries. See inline TODOs if you want to
- * refine behavior.
+ * Source arguments: ISC takes source <b>ids</b>. IIQ application ids will
+ * never match ISC source ids, so every {@code sourceId} argument here is
+ * resolved as an id first and then, if no application has that id, as an
+ * application name. Rules can therefore be tested with IIQ ids or names, but
+ * must use ISC source ids once deployed.
  */
 public class IdnRuleUtil implements IIdnRuleUtil {
+
+    /** Operation that matches values beginning with the supplied value. */
+    public static final String STARTS_WITH_FILTER = "StartsWith";
+
+    /** Operation that matches values equal to the supplied value. */
+    public static final String EQUALS_FILTER = "Equals";
+
+    /** The Permission managed attribute type, for findManagedAttributes. */
+    public static final String TYPE_PERMISSION = "Permission";
+
+    /** The Entitlement managed attribute type, for findManagedAttributes. */
+    public static final String TYPE_ENTITLEMENT = "Entitlement";
+
+    /** ISC caps findIdentitiesBySearchableIdentityAttribute at 50 results. */
+    static final int MAX_IDENTITY_RESULTS = 50;
+
+    /** ISC caps findManagedAttributes at 250 results. */
+    static final int MAX_MANAGED_ATTRIBUTE_RESULTS = 250;
+
+    /**
+     * The properties of the managed attribute model that findManagedAttributes
+     * can query and sort on.
+     */
+    public enum ManagedAttributeProperty {
+        /** The display name of the entitlement (display name, or name if unset). */
+        displayableName,
+        /** The raw value of the entitlement. */
+        value
+    }
+
+    /** The match operations supported by findManagedAttributes. */
+    public enum FindOperation {
+        /** Matches property values equal to the supplied value. */
+        EQUALS,
+        /** Matches property values beginning with the supplied value. */
+        STARTS_WITH
+    }
 
     private final SailPointContext context;
 
@@ -50,419 +91,395 @@ public class IdnRuleUtil implements IIdnRuleUtil {
     }
 
     // -------------------------
-    // Existence / lookup helpers
+    // Account existence / lookup
     // -------------------------
     @Override
-    public boolean accountExistsByDisplayName(String applicationName, String displayName) throws GeneralException {
-        return getFirstLinkByAppAndAttribute(applicationName, "displayName", displayName) != null;
+    public boolean accountExistsByNativeIdentity(String sourceId, String nativeIdentity) throws GeneralException {
+        return getFirstLink(sourceId, "nativeIdentity", nativeIdentity) != null;
     }
 
     @Override
-    public boolean accountExistsByNativeIdentity(String applicationName, String nativeIdentity)
-            throws GeneralException {
-        return getFirstLinkByAppAndAttribute(applicationName, "nativeIdentity", nativeIdentity) != null;
-    }
-
-    // -------------------------
-    // attribute search across sources
-    // -------------------------
-    @Override
-    public int attrSearchCountAccounts(List<String> sourceIds, String attributeName, String operation,
-            List<String> values) throws GeneralException {
-        // Approximation: count Links where application.id in sourceIds and
-        // attributeName equals any of the supplied values.
-        if (sourceIds == null || sourceIds.isEmpty() || values == null || values.isEmpty()) {
-            return 0;
-        }
-
-        QueryOptions qo = new QueryOptions();
-        List<Filter> sourceFilters = new ArrayList<>();
-        for (String sid : sourceIds) {
-            sourceFilters.add(Filter.eq("application.id", sid));
-        }
-        qo.add(Filter.and(Filter.or(sourceFilters.toArray(new Filter[0])),
-                Filter.in(attributeName, values)));
-        return context.countObjects(Link.class, qo);
+    public boolean accountExistsByDisplayName(String sourceId, String displayName) throws GeneralException {
+        return getFirstLink(sourceId, "displayName", displayName) != null;
     }
 
     @Override
-    public String attrSearchGetIdentityName(List<String> sourceIds, String attributeName, String operation,
-            List<String> values) throws GeneralException {
-        // Return the identity name of the first matching account.
-        if (sourceIds == null || sourceIds.isEmpty() || values == null || values.isEmpty()) {
+    public Account getAccountByNativeIdentity(String sourceId, String nativeIdentity) throws GeneralException {
+        Link link = getFirstLink(sourceId, "nativeIdentity", nativeIdentity);
+        return link != null ? new Account(link) : null;
+    }
+
+    @Override
+    public Account getAccountByDisplayName(String sourceId, String displayName) throws GeneralException {
+        Link link = getFirstLink(sourceId, "displayName", displayName);
+        return link != null ? new Account(link) : null;
+    }
+
+    /**
+     * @return the accounts, or null if the identity has no accounts on the
+     *         source or either parameter is null (matches ISC)
+     */
+    @Override
+    public List<Account> getAllAccounts(String sourceId, String identityName) throws GeneralException {
+        if (sourceId == null || identityName == null) {
             return null;
         }
+        List<Account> accounts = getIdentityAccounts(sourceId, identityName);
+        return accounts.isEmpty() ? null : accounts;
+    }
 
-        QueryOptions qo = new QueryOptions();
-        List<Filter> sourceFilters = new ArrayList<>();
-        for (String sid : sourceIds) {
-            sourceFilters.add(Filter.eq("application.id", sid));
+    @Override
+    public Account getFirstAccount(String sourceId, String identityName) throws GeneralException {
+        Application app = resolveSource(sourceId);
+        if (app == null || identityName == null) {
+            return null;
         }
-        qo.add(Filter.and(Filter.or(sourceFilters.toArray(new Filter[0])),
-                Filter.in(attributeName, values)));
+        QueryOptions qo = new QueryOptions();
+        qo.setResultLimit(1);
+        qo.add(Filter.eq("application.id", app.getId()));
+        qo.add(Filter.eq("identity.name", identityName));
         List<Link> links = context.getObjects(Link.class, qo);
-        if (links == null || links.isEmpty()) {
-            return null;
+        return (links == null || links.isEmpty()) ? null : new Account(links.get(0));
+    }
+
+    @Override
+    public String getFirstAccountNativeIdentity(String sourceId, String identityName) throws GeneralException {
+        Account a = getFirstAccount(sourceId, identityName);
+        return a != null ? a.getNativeIdentity() : null;
+    }
+
+    /**
+     * @return the first non-null and non-empty nativeIdentity whose attribute
+     *         matches. Two nulls are equal; an empty string is treated as null.
+     */
+    @Override
+    public String getFirstAccountNativeIdentityByAttribute(String sourceId, String identityName,
+            String attributeName, Object attributeValue) throws GeneralException {
+        for (Account account : findAccountsByAttribute(sourceId, identityName, attributeName, attributeValue)) {
+            String ni = account.getNativeIdentity();
+            if (ni != null && !ni.isEmpty()) {
+                return ni;
+            }
         }
-        Link first = links.get(0);
-        Identity id = first.getIdentity();
-        return id != null ? id.getName() : null;
+        return null;
     }
 
-    // -------------------------
-    // Counts and identity search
-    // -------------------------
+    /**
+     * Iterates the identity's accounts on the source and matches the attribute
+     * in memory (like ISC), so the attribute does not need to be searchable.
+     *
+     * @return the matching accounts, or an empty list if none match
+     */
     @Override
-    public int countAccounts(String applicationName) throws GeneralException {
-        QueryOptions qo = new QueryOptions();
-        qo.add(Filter.eq("application.name", applicationName));
-        return context.countObjects(Link.class, qo);
-    }
-
-    @Override
-    public int countIdentitiesBySearchableIdentityAttribute(String attributeName, String operation, String value)
-            throws GeneralException {
-        // Approximation: count Identities where attributeName matches value.
-        if (attributeName == null) {
-            return 0;
-        }
-        QueryOptions qo = new QueryOptions();
-        qo.add(Filter.eq(attributeName, value));
-        return context.countObjects(Identity.class, qo);
-    }
-
-    @Override
-    public List<Account> findAccountsByAttribute(String applicationName, String identityName, String attributeName,
+    public List<Account> findAccountsByAttribute(String sourceId, String identityName, String attributeName,
             Object attributeValue) throws GeneralException {
-
-        QueryOptions qo = new QueryOptions();
-        List<Filter> filters = new ArrayList<>();
-        filters.add(Filter.eq("application.name", applicationName));
-        filters.add(Filter.eq("identity.name", identityName));
-        if (attributeName != null && attributeValue != null) {
-            filters.add(Filter.eq(attributeName, attributeValue));
-        }
-        qo.add(Filter.and(filters.toArray(new Filter[0])));
-        List<Link> links = context.getObjects(Link.class, qo);
-
         List<Account> result = new ArrayList<>();
-        if (links != null) {
-            for (Link l : links) {
-                result.add(convertLinkToAccount(l));
+        if (sourceId == null || identityName == null) {
+            return result;
+        }
+        Object expected = emptyToNull(attributeValue);
+        for (Account account : getIdentityAccounts(sourceId, identityName)) {
+            Object actual = emptyToNull(account.getAttributes().get(attributeName));
+            if (nullSafeEq(expected, actual, true)) {
+                result.add(account);
             }
         }
         return result;
     }
 
     @Override
-    public List<sailpoint.object.Identity> findIdentitiesBySearchableIdentityAttribute(String attributeName,
-            String operation, String value, String sortAttribute) throws GeneralException {
-        if (attributeName == null) {
-            return Collections.emptyList();
+    public int countAccounts(String sourceId) throws GeneralException {
+        Application app = resolveSource(sourceId);
+        if (app == null) {
+            return 0;
         }
         QueryOptions qo = new QueryOptions();
-        qo.add(Filter.eq(attributeName, value));
-        if (sortAttribute != null) {
-            qo.setOrderBy(sortAttribute);
-        }
-        return context.getObjects(Identity.class, qo);
+        qo.add(Filter.eq("application.id", app.getId()));
+        return context.countObjects(Link.class, qo);
     }
 
     // -------------------------
     // Account attribute accessors
     // -------------------------
     @Override
-    public String getAccountAttribute(Account account, String attribute) throws GeneralException {
-        Object raw = getRawAccountAttribute(account, attribute);
-        return raw != null ? raw.toString() : null;
-    }
-
-    @Override
-    public String getAccountAttribute(String applicationName, String nativeIdentity, String attribute)
+    public Object getRawAccountAttribute(String sourceId, String nativeIdentity, String attribute)
             throws GeneralException {
-        Object raw = getRawAccountAttribute(applicationName, nativeIdentity, attribute);
-        return raw != null ? raw.toString() : null;
+        Link link = getFirstLink(sourceId, "nativeIdentity", nativeIdentity);
+        return link != null ? link.getAttribute(attribute) : null;
     }
 
     @Override
-    public boolean getAccountAttributeBool(Account account, String attribute) throws GeneralException {
-        Object raw = getRawAccountAttribute(account, attribute);
-        if (raw == null)
-            return false;
-        if (raw instanceof Boolean)
-            return (Boolean) raw;
-        return Boolean.parseBoolean(raw.toString());
+    public Object getRawAccountAttribute(Account account, String attribute) {
+        return account != null ? account.getAttributes().get(attribute) : null;
     }
 
     @Override
-    public boolean getAccountAttributeBool(String applicationName, String nativeIdentity, String attribute)
+    public String getAccountAttribute(String sourceId, String nativeIdentity, String attribute)
             throws GeneralException {
-        Object raw = getRawAccountAttribute(applicationName, nativeIdentity, attribute);
-        if (raw == null)
-            return false;
-        if (raw instanceof Boolean)
-            return (Boolean) raw;
-        return Boolean.parseBoolean(raw.toString());
+        return otoa(getRawAccountAttribute(sourceId, nativeIdentity, attribute));
     }
 
     @Override
-    public int getAccountAttributeInt(Account account, String attribute) throws GeneralException {
-        Object raw = getRawAccountAttribute(account, attribute);
-        if (raw == null)
-            return 0;
-        if (raw instanceof Number)
-            return ((Number) raw).intValue();
+    public String getAccountAttribute(Account account, String attribute) {
+        return otoa(getRawAccountAttribute(account, attribute));
+    }
+
+    @Override
+    public boolean getAccountAttributeBool(String sourceId, String nativeIdentity, String attribute)
+            throws GeneralException {
+        return otob(getRawAccountAttribute(sourceId, nativeIdentity, attribute));
+    }
+
+    @Override
+    public boolean getAccountAttributeBool(Account account, String attribute) {
+        return otob(getRawAccountAttribute(account, attribute));
+    }
+
+    @Override
+    public int getAccountAttributeInt(String sourceId, String nativeIdentity, String attribute)
+            throws GeneralException {
+        return toInt(getRawAccountAttribute(sourceId, nativeIdentity, attribute));
+    }
+
+    @Override
+    public int getAccountAttributeInt(Account account, String attribute) {
+        return toInt(getRawAccountAttribute(account, attribute));
+    }
+
+    // -------------------------
+    // Searchable account attributes
+    // -------------------------
+    @Override
+    public int attrSearchCountAccounts(List<String> sourceIds, String attributeName, String operation,
+            List<String> values) {
         try {
-            return Integer.parseInt(raw.toString());
-        } catch (Exception e) {
-            throw new GeneralException("Attribute cannot be parsed as int: " + raw, e);
+            Filter filter = buildAttrSearchFilter(sourceIds, attributeName, operation, values);
+            if (filter == null) {
+                return 0;
+            }
+            QueryOptions qo = new QueryOptions();
+            qo.add(filter);
+            return context.countObjects(Link.class, qo);
+        } catch (GeneralException e) {
+            throw new IllegalStateException(e);
         }
     }
 
     @Override
-    public int getAccountAttributeInt(String applicationName, String nativeIdentity, String attribute)
-            throws GeneralException {
-        Object raw = getRawAccountAttribute(applicationName, nativeIdentity, attribute);
-        if (raw == null)
-            return 0;
-        if (raw instanceof Number)
-            return ((Number) raw).intValue();
+    public String attrSearchGetIdentityName(List<String> sourceIds, String attributeName, String operation,
+            List<String> values) {
         try {
-            return Integer.parseInt(raw.toString());
-        } catch (Exception e) {
-            throw new GeneralException("Attribute cannot be parsed as int: " + raw, e);
+            Filter filter = buildAttrSearchFilter(sourceIds, attributeName, operation, values);
+            if (filter == null) {
+                return null;
+            }
+            QueryOptions qo = new QueryOptions();
+            qo.add(filter);
+            qo.add(Filter.notnull("identity"));
+            qo.setResultLimit(1);
+            List<Link> links = context.getObjects(Link.class, qo);
+            if (links == null || links.isEmpty() || links.get(0).getIdentity() == null) {
+                return null;
+            }
+            return links.get(0).getIdentity().getName();
+        } catch (GeneralException e) {
+            throw new IllegalStateException(e);
         }
     }
 
     // -------------------------
-    // Account lookup & lists
+    // Managed attributes
     // -------------------------
     @Override
-    public Account getAccountByDisplayName(String applicationName, String displayName) throws GeneralException {
-        Link link = getFirstLinkByAppAndAttribute(applicationName, "displayName", displayName);
-        return link != null ? convertLinkToAccount(link) : null;
-    }
-
-    @Override
-    public Account getAccountByNativeIdentity(String applicationName, String nativeIdentity) throws GeneralException {
-        Link link = getFirstLinkByAppAndAttribute(applicationName, "nativeIdentity", nativeIdentity);
-        return link != null ? convertLinkToAccount(link) : null;
-    }
-
-    @Override
-    public List<Account> getAllAccounts(String applicationName, String identityName) throws GeneralException {
-        QueryOptions qo = new QueryOptions();
-        List<Filter> filters = new ArrayList<>();
-        filters.add(Filter.eq("application.name", applicationName));
-        filters.add(Filter.eq("identity.name", identityName));
-        qo.add(Filter.and(filters.toArray(new Filter[0])));
-        Iterator<Link> linkIterator = context.search(Link.class, qo);
-        List<Account> out = new ArrayList<>();
-        while (linkIterator.hasNext()) {
-            Link link = linkIterator.next();
-            out.add(convertLinkToAccount(link));
-        }
-        return out;
-    }
-
-    @Override
-    public Account getFirstAccount(String applicationName, String identityName) throws GeneralException {
-        QueryOptions qo = new QueryOptions();
-        qo.setResultLimit(1);
-        qo.add(Filter.eq("application.name", applicationName));
-        qo.add(Filter.eq("identity.name", identityName));
-        List<Link> links = context.getObjects(Link.class, qo);
-        return (links == null || links.isEmpty()) ? null : convertLinkToAccount(links.get(0));
-    }
-
-    @Override
-    public String getFirstAccountNativeIdentity(String applicationName, String identityName) throws GeneralException {
-        Account a = getFirstAccount(applicationName, identityName);
-        return a != null ? a.getNativeIdentity() : null;
-    }
-
-    @Override
-    public String getFirstAccountNativeIdentityByAttribute(String applicationName, String identityName,
-            String attributeName, Object attributeValue) throws GeneralException {
-        List<Account> accounts = findAccountsByAttribute(applicationName, identityName, attributeName, attributeValue);
-        return (accounts == null || accounts.isEmpty()) ? null : accounts.get(0).getNativeIdentity();
-    }
-
-    // -------------------------
-    // Identity & ManagedAttribute helpers
-    // -------------------------
-    @Override
-    public sailpoint.object.Identity getIdentityById(String id) throws GeneralException {
-        if (id == null)
-            return null;
-        return context.getObjectById(sailpoint.object.Identity.class, id);
-    }
-
-    @Override
-    public String getManagedAttributeDescription(String sourceId, String name, String value, ManagedAttribute.Type type)
-            throws GeneralException {
-        QueryOptions qo = new QueryOptions();
-        qo.setResultLimit(1);
-        List<Filter> filters = new ArrayList<>();
-        if (sourceId != null)
-            filters.add(Filter.eq("application.id", sourceId));
-        filters.add(Filter.eq("attribute", name));
-        filters.add(Filter.eq("value", value));
-        filters.add(Filter.eq("type", type));
-        if (!filters.isEmpty())
-            qo.add(Filter.and(filters.toArray(new Filter[0])));
-        List<ManagedAttribute> mas = context.getObjects(ManagedAttribute.class, qo);
-        if (mas == null || mas.isEmpty())
-            return null;
-        return mas.get(0).getDescription(Locale.ENGLISH);
+    public String getManagedAttributeDescription(String sourceId, String name, String value,
+            ManagedAttribute.Type type) throws GeneralException {
+        ManagedAttribute ma = findManagedAttribute(sourceId, name, value, type);
+        return ma != null ? describe(ma) : null;
     }
 
     @Override
     public ManagedAttributeDetails getManagedAttributeDetails(String sourceId, String name, String value,
             ManagedAttribute.Type type) throws GeneralException {
-        // Build a minimal ManagedAttributeDetails-like object.
-        // sailpoint.rule.ManagedAttributeDetails exists in IDN rule API; create and
-        // populate a compatible object if available in your runtime.
-        List<ManagedAttribute> mas = context.getObjects(ManagedAttribute.class,
-                new QueryOptions().add(Filter.and(
-                        Filter.eq("application.id", sourceId),
-                        Filter.eq("attribute", name),
-                        Filter.eq("value", value),
-                        Filter.eq("type", type))));
-        if (mas == null || mas.isEmpty()) {
-            return null;
+        ManagedAttribute ma = findManagedAttribute(sourceId, name, value, type);
+        return ma != null ? toDetails(ma, false) : null;
+    }
+
+    @Override
+    public List<ManagedAttributeDetails> findManagedAttributes(String sourceId, String attributeName,
+            ManagedAttributeProperty property, FindOperation operation, String valueToMatch,
+            String entitlementType, ManagedAttributeProperty sortAttribute) throws GeneralException {
+        Objects.requireNonNull(sourceId, "sourceId is required");
+        List<ManagedAttributeDetails> result = new ArrayList<>();
+        Application app = resolveSource(sourceId);
+        if (app == null) {
+            return result;
         }
 
-        ManagedAttribute ma = mas.get(0);
-        ManagedAttributeDetails details = new ManagedAttributeDetails();
-        details.setDescription(ma.getDescription((Locale.ENGLISH)));
-        details.setValue(ma.getValue());
-        details.setName(ma.getName());
-        // If additional fields are needed, populate them here.
+        List<Filter> filters = new ArrayList<>();
+        filters.add(Filter.eq("application.id", app.getId()));
+        if (attributeName != null) {
+            filters.add(Filter.eq("attribute", attributeName));
+        }
+        if (property != null) {
+            if (operation == FindOperation.STARTS_WITH) {
+                filters.add(Filter.like(property.name(), valueToMatch, Filter.MatchMode.START));
+            } else {
+                filters.add(Filter.eq(property.name(), valueToMatch));
+            }
+        }
+        if (entitlementType != null) {
+            filters.add(Filter.eq("type", entitlementType));
+        } else {
+            // ISC: when null, every type other than Permission is matched
+            filters.add(Filter.or(Filter.isnull("type"), Filter.ne("type", TYPE_PERMISSION)));
+        }
 
-        return details;
+        QueryOptions qo = new QueryOptions();
+        qo.add(Filter.and(filters));
+        qo.setResultLimit(MAX_MANAGED_ATTRIBUTE_RESULTS);
+        if (sortAttribute != null) {
+            qo.addOrdering(sortAttribute.name(), true);
+        }
+
+        Iterator<ManagedAttribute> it = context.search(ManagedAttribute.class, qo);
+        while (it.hasNext()) {
+            result.add(toDetails(it.next(), true));
+        }
+        return result;
     }
 
     // -------------------------
-    // Raw attribute accessors
+    // Identities
     // -------------------------
+    /**
+     * @throws IllegalStateException if the identity is not found (matches ISC)
+     */
     @Override
-    public Object getRawAccountAttribute(Account account, String attribute) throws GeneralException {
-        if (account == null)
-            return null;
-        return account.getRawAttribute(attribute);
+    public Identity getIdentityById(String id) {
+        try {
+            sailpoint.object.Identity identity = id != null
+                    ? context.getObjectById(sailpoint.object.Identity.class, id)
+                    : null;
+            if (identity == null) {
+                throw new IllegalStateException("Identity not found: " + id);
+            }
+            return new IdentityImpl(identity);
+        } catch (GeneralException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     @Override
-    public Object getRawAccountAttribute(String applicationName, String nativeIdentity, String attribute)
-            throws GeneralException {
-        Link link = getFirstLinkByAppAndAttribute(applicationName, "nativeIdentity", nativeIdentity);
-        if (link == null)
-            return null;
-        return link.getAttribute(attribute);
-    }
-
-    // -------------------------
-    // Source attribute by id/name
-    // -------------------------
-    @Override
-    public String getSourceAttributeBySourceId(String sourceId, String attributeName) throws GeneralException {
-        if (sourceId == null || attributeName == null)
-            return null;
-        Application app = context.getObjectById(sailpoint.object.Application.class, sourceId);
-        if (app == null)
-            return null;
-        Object val = app.getAttributeValue(attributeName);
-        return val != null ? val.toString() : null;
+    public List<Identity> findIdentitiesBySearchableIdentityAttribute(String attributeName, String operation,
+            String value, String sortAttribute) {
+        QueryOptions qo = new QueryOptions();
+        qo.add(buildIdentitySearchFilter(attributeName, operation, value));
+        // ISC sorts ascending, by uid when no sort attribute is given (IIQ: name)
+        qo.addOrdering(sortAttribute != null ? sortAttribute : "name", true);
+        qo.setResultLimit(MAX_IDENTITY_RESULTS);
+        try {
+            List<Identity> result = new ArrayList<>();
+            Iterator<sailpoint.object.Identity> it = context.search(sailpoint.object.Identity.class, qo);
+            while (it.hasNext()) {
+                result.add(new IdentityImpl(it.next()));
+            }
+            return result;
+        } catch (GeneralException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     @Override
-    public String getSourceAttributeBySourceName(String sourceName, String attributeName) throws GeneralException {
-        if (sourceName == null || attributeName == null)
-            return null;
-        Application app = context.getObjectByName(Application.class, sourceName);
-        if (app == null)
-            return null;
-        Object val = app.getAttributeValue(attributeName);
-        return val != null ? val.toString() : null;
+    public int countIdentitiesBySearchableIdentityAttribute(String attributeName, String operation, String value) {
+        QueryOptions qo = new QueryOptions();
+        qo.add(buildIdentitySearchFilter(attributeName, operation, value));
+        try {
+            return context.countObjects(sailpoint.object.Identity.class, qo);
+        } catch (GeneralException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     // -------------------------
     // Uniqueness checks
     // -------------------------
+    /**
+     * Calls getObject() on the source's connector.
+     *
+     * @return true if no account with the given id exists
+     * @throws IllegalStateException if the source can't be found or the
+     *                               connector call fails
+     */
     @Override
-    public boolean isUniqueAccountId(String identityNameOrId, String applicationNameOrId, String accountId)
-            throws GeneralException {
-        Application app = fetchApplicationByIdOrName(applicationNameOrId);
-        Connector appConn = ConnectorFactory.getConnector(app, null);
+    public boolean isUniqueAccountId(String identityNameOrId, String applicationNameOrId, String accountId) {
+        Application app = requireApplication(applicationNameOrId);
         try {
-            return (ResourceObject) appConn.getObject(Connector.TYPE_ACCOUNT, accountId, null) != null ? false : true;
-        } catch (ConnectorException e) {
-            e.printStackTrace();
+            Connector connector = ConnectorFactory.getConnector(app, null);
+            return connector.getObject(Connector.TYPE_ACCOUNT, accountId, null) == null;
+        } catch (ObjectNotFoundException e) {
+            return true;
+        } catch (Exception e) {
+            throw new IllegalStateException("Connector getObject failed for " + app.getName() + ": "
+                    + e.getMessage(), e);
         }
-        return false;
     }
 
+    /**
+     * Searches the source's LDAP directory for (attributeName=attributeValue).
+     * Assumes a single-domain AD/LDAP application using {@code domainSettings}.
+     *
+     * @return true if no entry has the value
+     * @throws IllegalStateException if the source can't be found or the search
+     *                               fails
+     */
     @Override
-    public boolean isUniqueLDAPValue(String identityNameOrId,
-            String applicationNameOrId,
-            String attributeName,
-            String attributeValue) throws GeneralException {
+    @SuppressWarnings("unchecked")
+    public boolean isUniqueLDAPValue(String identityNameOrId, String applicationNameOrId, String attributeName,
+            String attributeValue) {
+        Application app = requireApplication(applicationNameOrId);
 
-        Application app = fetchApplicationByIdOrName(applicationNameOrId);
-        if (app == null) {
-            throw new GeneralException("Application not found: " + applicationNameOrId);
-        }
-
-        // Assumes 1 domain setup
         List<Map<String, Object>> domainList = (List<Map<String, Object>>) app.getAttributeValue("domainSettings");
+        if (domainList == null || domainList.isEmpty()) {
+            throw new IllegalStateException("No domainSettings on application: " + app.getName());
+        }
         Map<String, Object> domainSettings = domainList.get(0);
 
-        // Read connection details from the Application attributes
-        List servers = (List) domainSettings.get("servers");
-        String host = (String) servers.get(0);
-        String port = (String) domainSettings.get("port");
-        String baseDN = (String) domainSettings.get("domainDN");
-        String user = (String) domainSettings.get("user");
-        String password = (String) domainSettings.get("password");
-        String useSSL = (String) domainSettings.get("useSSL");
+        List<?> servers = (List<?>) domainSettings.get("servers");
+        String host = (servers != null && !servers.isEmpty()) ? otoa(servers.get(0)) : null;
+        String port = otoa(domainSettings.get("port"));
+        String baseDN = otoa(domainSettings.get("domainDN"));
+        String user = otoa(domainSettings.get("user"));
+        String password = otoa(domainSettings.get("password"));
+        boolean useSSL = otob(domainSettings.get("useSSL"));
 
-        if (host == null || baseDN == null || port == null || user == null || password == null) {
-            throw new GeneralException("Missing LDAP connection info on application: " + app.getName());
+        if (host == null || baseDN == null || user == null || password == null) {
+            throw new IllegalStateException("Missing LDAP connection info on application: " + app.getName());
         }
 
-        // Build LDAP connection environment
         Hashtable<String, String> env = new Hashtable<>();
-        String ldapUrl = "ldap" + ("true".equalsIgnoreCase(useSSL) ? "s" : "") +
-                "://" + host + (port != null ? ":" + port : "");
-
+        String ldapUrl = "ldap" + (useSSL ? "s" : "") + "://" + host + (port != null ? ":" + port : "");
         env.put(Context.INITIAL_CONTEXT_FACTORY, "com.sun.jndi.ldap.LdapCtxFactory");
         env.put(Context.PROVIDER_URL, ldapUrl);
         env.put(Context.SECURITY_AUTHENTICATION, "simple");
-        env.put(Context.SECURITY_PRINCIPAL, baseDN);
-        env.put(Context.SECURITY_CREDENTIALS, context.decrypt(password));
+        env.put(Context.SECURITY_PRINCIPAL, user);
 
         DirContext ctx = null;
         try {
+            env.put(Context.SECURITY_CREDENTIALS, context.decrypt(password));
             ctx = new InitialDirContext(env);
 
-            // Create LDAP filter: e.g. (attributeName=attributeValue)
             String filter = "(" + attributeName + "=" + escapeLdapValue(attributeValue) + ")";
-
-            // Search controls
             SearchControls controls = new SearchControls();
             controls.setSearchScope(SearchControls.SUBTREE_SCOPE);
             controls.setReturningAttributes(new String[] { attributeName });
+            controls.setCountLimit(1);
 
             NamingEnumeration<SearchResult> results = ctx.search(baseDN, filter, controls);
-
-            // If any result found, it means value is NOT unique
             boolean hasEntries = results.hasMore();
             results.close();
-
-            return !hasEntries; // true = unique, false = already exists
-        } catch (NamingException e) {
-            throw new GeneralException("LDAP lookup failed for " + app.getName() + ": " + e.getMessage(), e);
+            return !hasEntries;
+        } catch (NamingException | GeneralException e) {
+            throw new IllegalStateException("LDAP lookup failed for " + app.getName() + ": " + e.getMessage(), e);
         } finally {
             if (ctx != null) {
                 try {
@@ -473,38 +490,304 @@ public class IdnRuleUtil implements IIdnRuleUtil {
         }
     }
 
-    private String escapeLdapValue(String value) {
+    // -------------------------
+    // Source attributes
+    // -------------------------
+    @Override
+    public String getSourceAttributeBySourceId(String sourceId, String attributeName) throws GeneralException {
+        if (attributeName == null) {
+            return null;
+        }
+        Application app = resolveSource(sourceId);
+        return app != null ? otoa(app.getAttributeValue(attributeName)) : null;
+    }
+
+    @Override
+    public String getSourceAttributeBySourceName(String sourceName, String attributeName) throws GeneralException {
+        if (sourceName == null || attributeName == null) {
+            return null;
+        }
+        Application app = context.getObjectByName(Application.class, sourceName);
+        return app != null ? otoa(app.getAttributeValue(attributeName)) : null;
+    }
+
+    // -------------------------
+    // Utility helpers (ISC IdnRuleUtil)
+    // -------------------------
+    /** @return the String value of a non-null object, null otherwise */
+    @Override
+    public String otoa(Object object) {
+        return object != null ? object.toString() : null;
+    }
+
+    /** @return true if the object is Boolean.TRUE or the String "true" ignoring case */
+    @Override
+    public boolean otob(Object object) {
+        if (object instanceof Boolean) {
+            return (Boolean) object;
+        }
+        return object instanceof String && "true".equalsIgnoreCase((String) object);
+    }
+
+    /**
+     * @return a List as is, any other collection copied into a new List, a
+     *         non-collection wrapped in a single element List, or null for null
+     */
+    @Override
+    @SuppressWarnings({ "rawtypes", "unchecked" })
+    public List asList(Object object) {
+        if (object == null) {
+            return null;
+        }
+        if (object instanceof List) {
+            return (List) object;
+        }
+        if (object instanceof Collection) {
+            return new ArrayList((Collection) object);
+        }
+        List list = new ArrayList();
+        list.add(object);
+        return list;
+    }
+
+    /** @return true if both objects are non-null and equal (two nulls are not equal) */
+    @Override
+    public boolean nullSafeEq(Object o1, Object o2) {
+        return nullSafeEq(o1, o2, false);
+    }
+
+    @Override
+    public boolean nullSafeEq(Object o1, Object o2, boolean nullsEq) {
+        if (o1 == null && o2 == null) {
+            return nullsEq;
+        }
+        return o1 != null && o1.equals(o2);
+    }
+
+    /** @return true if the Strings are equal ignoring case (two nulls are equal) */
+    @Override
+    public boolean nullSafeCaseInsensitiveEq(String o1, String o2) {
+        if (o1 == null && o2 == null) {
+            return true;
+        }
+        return o1 != null && o1.equalsIgnoreCase(o2);
+    }
+
+    /** Two nulls are equal, and a null sorts after a non-null. */
+    @Override
+    @SuppressWarnings({ "rawtypes", "unchecked" })
+    public <T extends Comparable> int nullSafeCompareTo(T o1, T o2) {
+        if (o1 == null && o2 == null) {
+            return 0;
+        }
+        if (o1 == null) {
+            return 1;
+        }
+        if (o2 == null) {
+            return -1;
+        }
+        return o1.compareTo(o2);
+    }
+
+    /** Formats the date using the JVM's default time zone. */
+    @Override
+    public String dateToString(Date src, String format) {
+        return dateToString(src, format, TimeZone.getDefault());
+    }
+
+    @Override
+    public String dateToString(Date src, String format, TimeZone tz) {
+        if (src == null) {
+            return null;
+        }
+        SimpleDateFormat sdf = new SimpleDateFormat(format);
+        sdf.setTimeZone(tz != null ? tz : TimeZone.getDefault());
+        return sdf.format(src);
+    }
+
+    // -------------------------
+    // Internal helpers
+    // -------------------------
+    /**
+     * Resolves an ISC source id argument to an IIQ Application: by id first,
+     * then by name (IIQ ids never match ISC source ids).
+     */
+    private Application resolveSource(String sourceIdOrName) throws GeneralException {
+        if (sourceIdOrName == null) {
+            return null;
+        }
+        Application app = context.getObjectById(Application.class, sourceIdOrName);
+        if (app == null) {
+            app = context.getObjectByName(Application.class, sourceIdOrName);
+        }
+        return app;
+    }
+
+    private Application requireApplication(String applicationNameOrId) {
+        Application app;
+        try {
+            app = resolveSource(applicationNameOrId);
+        } catch (GeneralException e) {
+            throw new IllegalStateException(e);
+        }
+        if (app == null) {
+            throw new IllegalStateException("Could not find source by id or name: " + applicationNameOrId);
+        }
+        return app;
+    }
+
+    private Link getFirstLink(String sourceId, String property, Object value) throws GeneralException {
+        Application app = resolveSource(sourceId);
+        if (app == null || value == null) {
+            return null;
+        }
+        QueryOptions qo = new QueryOptions();
+        qo.add(Filter.eq("application.id", app.getId()));
+        qo.add(Filter.eq(property, value));
+        qo.setResultLimit(1);
+        List<Link> list = context.getObjects(Link.class, qo);
+        return (list == null || list.isEmpty()) ? null : list.get(0);
+    }
+
+    private List<Account> getIdentityAccounts(String sourceId, String identityName) throws GeneralException {
+        List<Account> out = new ArrayList<>();
+        Application app = resolveSource(sourceId);
+        if (app == null || identityName == null) {
+            return out;
+        }
+        QueryOptions qo = new QueryOptions();
+        qo.add(Filter.eq("application.id", app.getId()));
+        qo.add(Filter.eq("identity.name", identityName));
+        Iterator<Link> it = context.search(Link.class, qo);
+        while (it.hasNext()) {
+            out.add(new Account(it.next()));
+        }
+        return out;
+    }
+
+    private Filter buildAttrSearchFilter(List<String> sourceIds, String attributeName, String operation,
+            List<String> values) throws GeneralException {
+        if (attributeName == null) {
+            throw new IllegalStateException("attributeName is required");
+        }
+        if (values == null || values.isEmpty()) {
+            throw new IllegalStateException("values are required");
+        }
+        boolean startsWith = isStartsWith(operation);
+
+        List<String> appIds = new ArrayList<>();
+        if (sourceIds != null) {
+            for (String sid : sourceIds) {
+                Application app = resolveSource(sid);
+                if (app != null) {
+                    appIds.add(app.getId());
+                }
+            }
+        }
+        if (appIds.isEmpty()) {
+            return null;
+        }
+
+        List<Filter> valueFilters = new ArrayList<>();
+        for (String v : values) {
+            valueFilters.add(startsWith
+                    ? Filter.like(attributeName, v, Filter.MatchMode.START)
+                    : Filter.eq(attributeName, v));
+        }
+        Filter valueFilter = valueFilters.size() == 1 ? valueFilters.get(0) : Filter.or(valueFilters);
+        return Filter.and(Filter.in("application.id", appIds), valueFilter);
+    }
+
+    private Filter buildIdentitySearchFilter(String attributeName, String operation, String value) {
+        if (attributeName == null) {
+            throw new IllegalStateException("attributeName is required");
+        }
+        if (value == null) {
+            throw new IllegalStateException("value is required");
+        }
+        return isStartsWith(operation)
+                ? Filter.like(attributeName, value, Filter.MatchMode.START)
+                : Filter.eq(attributeName, value);
+    }
+
+    /** Only Equals and StartsWith are supported, as in ISC. */
+    private boolean isStartsWith(String operation) {
+        if (STARTS_WITH_FILTER.equalsIgnoreCase(operation)) {
+            return true;
+        }
+        if (EQUALS_FILTER.equalsIgnoreCase(operation)) {
+            return false;
+        }
+        throw new IllegalStateException("Unsupported operation '" + operation + "'; use "
+                + EQUALS_FILTER + " or " + STARTS_WITH_FILTER);
+    }
+
+    private ManagedAttribute findManagedAttribute(String sourceId, String name, String value,
+            ManagedAttribute.Type type) throws GeneralException {
+        Application app = resolveSource(sourceId);
+        if (app == null) {
+            return null;
+        }
+        // ISC: type defaults to Entitlement when null
+        String typeName = (type != null ? type : ManagedAttribute.Type.Entitlement).name();
+        QueryOptions qo = new QueryOptions();
+        qo.add(Filter.eq("application.id", app.getId()));
+        qo.add(Filter.eq("attribute", name));
+        qo.add(Filter.eq("value", value));
+        qo.add(Filter.eq("type", typeName));
+        qo.setResultLimit(1);
+        List<ManagedAttribute> mas = context.getObjects(ManagedAttribute.class, qo);
+        return (mas == null || mas.isEmpty()) ? null : mas.get(0);
+    }
+
+    private String describe(ManagedAttribute ma) {
+        String desc = ma.getDescription(Locale.getDefault());
+        if (desc == null) {
+            desc = ma.getDescription(Locale.ENGLISH);
+        }
+        if (desc == null && ma.getDescriptions() != null && !ma.getDescriptions().isEmpty()) {
+            desc = ma.getDescriptions().values().iterator().next();
+        }
+        return desc;
+    }
+
+    private ManagedAttributeDetails toDetails(ManagedAttribute ma, boolean includeDisplayableName) {
+        ManagedAttributeDetails details = new ManagedAttributeDetails()
+                .setName(ma.getName())
+                .setValue(ma.getValue())
+                .setDescription(describe(ma))
+                .setType(ma.getType());
+        if (ma.getAttributes() != null) {
+            details.setAttributes(new HashMap<>(ma.getAttributes()));
+        }
+        if (includeDisplayableName) {
+            details.setDisplayableName(ma.getDisplayableName());
+        }
+        return details;
+    }
+
+    private static Object emptyToNull(Object value) {
+        return (value instanceof String && ((String) value).isEmpty()) ? null : value;
+    }
+
+    private static int toInt(Object raw) {
+        if (raw == null) {
+            return 0;
+        }
+        if (raw instanceof Number) {
+            return ((Number) raw).intValue();
+        }
+        return Integer.parseInt(raw.toString().trim());
+    }
+
+    private static String escapeLdapValue(String value) {
+        if (value == null) {
+            return "";
+        }
         return value.replace("\\", "\\5c")
                 .replace("*", "\\2a")
                 .replace("(", "\\28")
                 .replace(")", "\\29")
                 .replace("\u0000", "\\00");
-    }
-
-    // -------------------------
-    // Helper utilities
-    // -------------------------
-    private Link getFirstLinkByAppAndAttribute(String applicationName, String attributeName, Object attributeValue)
-            throws GeneralException {
-        QueryOptions qo = new QueryOptions();
-        qo.add(Filter.and(Filter.eq("application.name", applicationName), Filter.eq(attributeName, attributeValue)));
-        List<Link> list = context.getObjects(Link.class, qo);
-        return (list == null || list.isEmpty()) ? null : list.get(0);
-    }
-
-    private Application fetchApplicationByIdOrName(String idOrName) throws GeneralException {
-        Application app = null;
-        try {
-            app = context.getObject(Application.class, idOrName);
-            if (app == null)
-                throw new GeneralException("Could not find application by id or name: " + idOrName);
-        } catch (Exception e) {
-            throw new GeneralException("Could not find application by id or name: " + idOrName, e);
-        }
-        return app;
-    }
-
-    private Account convertLinkToAccount(Link link) {
-        return new sailpoint.rule.Account(link);
     }
 }

@@ -22,8 +22,16 @@ IdnRuleUtil idn = new IdnRuleUtil(context);
 ```
 3. Use the functions as you would in an ISC rule
 ```java
-idn.countAccounts("HR [source]");
+idn.countAccounts("2c9180...sourceId");
 ```
+
+## Matching the ISC API
+The public API mirrors the [ISC rule Java docs](https://developer.sailpoint.com/docs/extensibility/rules/java-docs): `sailpoint.server.IdnRuleUtil`, `sailpoint.rule.Account`, `sailpoint.rule.Identity` and `sailpoint.rule.ManagedAttributeDetails`. Only call methods that appear in those docs; anything else compiles in IIQ but fails in ISC.
+
+- **Source IDs:** ISC methods take a `sourceId`. IIQ application IDs never match ISC source IDs, so this library resolves each `sourceId` argument as an IIQ application ID first, then as an application name. Rules can be tested with IIQ IDs or names, but **must be switched to ISC source IDs before deployment**.
+- **Identities:** `getIdentityById` and `findIdentitiesBySearchableIdentityAttribute` return `sailpoint.rule.Identity`, not `sailpoint.object.Identity`. Fields that are not standard IIQ identity properties are read from identity attributes: `cloudLifecycleState`, `uid` (falls back to name), `phone`, `workPhone`, `personalEmail`, `country` and `employeeNumber`.
+- **Accounts:** `sailpoint.rule.Account` exposes only the ISC getters (`getId`, `getNativeIdentity`, `getSourceId`, `getIdentityId`, `getAttributes`, `isDisabled`, ...). Read attributes with `account.getAttributes().get("x")` or `idn.getAccountAttribute(account, "x")`.
+- **Enums and constants:** `IdnRuleUtil.FindOperation`, `IdnRuleUtil.ManagedAttributeProperty`, `IdnRuleUtil.EQUALS_FILTER`, `STARTS_WITH_FILTER`, `TYPE_ENTITLEMENT` and `TYPE_PERMISSION` are available as in ISC.
 
 ## Cleanup before ISC deployment
 After you have developed and tested your rule in IdentityIQ and are ready to submit it for SailPoint ISC review, you will need to make sure you remove the `sailpoint.server.IdnRuleUtil` class import and `IdnRuleUtil` object declaration. **SailPoint's Cloud Rule validator does not appear to pick this up an un-allowed class, but your rule will either be declined during review or will throw errors when deployed, so make sure you perform this clean up. Additionally, make sure you convert any IIQ rule types to ISC rule types per the next section.**

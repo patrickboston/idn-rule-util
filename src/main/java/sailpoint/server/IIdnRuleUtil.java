@@ -1,77 +1,120 @@
 package sailpoint.server;
 
+import java.util.Date;
 import java.util.List;
+import java.util.TimeZone;
 
+import sailpoint.object.ManagedAttribute;
+import sailpoint.rule.Account;
+import sailpoint.rule.Identity;
 import sailpoint.rule.ManagedAttributeDetails;
 import sailpoint.tools.GeneralException;
 
 /**
- * Interface that mirrors SailPoint IdentityNow's sailpoint.server.IdnRuleUtil API.
- * NOTE: We map the IDN "Account" concept to a local Account interface so this can run in IIQ.
+ * Mirrors the ISC rule-facing {@code sailpoint.server.IdnRuleUtil} interface
+ * (https://developer.sailpoint.com/rule-java-docs/sailpoint/server/IdnRuleUtil.html).
+ *
+ * Signatures (parameter names, return types and declared exceptions) match the
+ * ISC javadoc. The constants and nested enums ({@code ManagedAttributeProperty},
+ * {@code FindOperation}) live on {@link IdnRuleUtil} so rules can reference them
+ * as {@code IdnRuleUtil.FindOperation.EQUALS} exactly as they would in ISC.
  */
 public interface IIdnRuleUtil {
 
-    // Account existence
-    boolean accountExistsByDisplayName(String applicationName, String displayName) throws GeneralException;
-    boolean accountExistsByNativeIdentity(String applicationName, String nativeIdentity) throws GeneralException;
+    // Account existence / lookup (by source id)
+    boolean accountExistsByNativeIdentity(String sourceId, String nativeIdentity) throws GeneralException;
 
-    // Attribute-based searches across accounts
-    int attrSearchCountAccounts(List<String> sourceIds, String attributeName, String operation, List<String> values) throws GeneralException;
-    String attrSearchGetIdentityName(List<String> sourceIds, String attributeName, String operation, List<String> values) throws GeneralException;
+    boolean accountExistsByDisplayName(String sourceId, String displayName) throws GeneralException;
 
-    // Counts
-    int countAccounts(String applicationName) throws GeneralException;
-    int countIdentitiesBySearchableIdentityAttribute(String attributeName, String operation, String value) throws GeneralException;
+    Account getAccountByNativeIdentity(String sourceId, String nativeIdentity) throws GeneralException;
 
-    // Finds
-    List<Account> findAccountsByAttribute(String applicationName, String identityName, String attributeName, Object attributeValue) throws GeneralException;
-    List<sailpoint.object.Identity> findIdentitiesBySearchableIdentityAttribute(String attributeName, String operation, String value, String sortAttribute) throws GeneralException;
+    Account getAccountByDisplayName(String sourceId, String displayName) throws GeneralException;
+
+    List<Account> getAllAccounts(String sourceId, String identityName) throws GeneralException;
+
+    Account getFirstAccount(String sourceId, String identityName) throws GeneralException;
+
+    String getFirstAccountNativeIdentity(String sourceId, String identityName) throws GeneralException;
+
+    String getFirstAccountNativeIdentityByAttribute(String sourceId, String identityName, String attributeName,
+            Object attributeValue) throws GeneralException;
+
+    List<Account> findAccountsByAttribute(String sourceId, String identityName, String attributeName,
+            Object attributeValue) throws GeneralException;
+
+    int countAccounts(String sourceId) throws GeneralException;
 
     // Account attribute accessors
-    String getAccountAttribute(Account account, String attribute) throws GeneralException;
-    String getAccountAttribute(String applicationName, String nativeIdentity, String attribute) throws GeneralException;
+    Object getRawAccountAttribute(String sourceId, String nativeIdentity, String attribute) throws GeneralException;
 
-    boolean getAccountAttributeBool(Account account, String attribute) throws GeneralException;
-    boolean getAccountAttributeBool(String applicationName, String nativeIdentity, String attribute) throws GeneralException;
+    Object getRawAccountAttribute(Account account, String attribute);
 
-    int getAccountAttributeInt(Account account, String attribute) throws GeneralException;
-    int getAccountAttributeInt(String applicationName, String nativeIdentity, String attribute) throws GeneralException;
+    String getAccountAttribute(String sourceId, String nativeIdentity, String attribute) throws GeneralException;
 
-    // Account lookup
-    Account getAccountByDisplayName(String applicationName, String displayName) throws GeneralException; // kept for parity but will return our Account or null
-    Account getAccountByNativeIdentity(String applicationName, String nativeIdentity) throws GeneralException;
+    String getAccountAttribute(Account account, String attribute);
 
-    List<Account> getAllAccounts(String applicationName, String identityName) throws GeneralException;
-    Account getFirstAccount(String applicationName, String identityName) throws GeneralException;
-    String getFirstAccountNativeIdentity(String applicationName, String identityName) throws GeneralException;
-    String getFirstAccountNativeIdentityByAttribute(String applicationName, String identityName, String attributeName, Object attributeValue) throws GeneralException;
+    boolean getAccountAttributeBool(String sourceId, String nativeIdentity, String attribute) throws GeneralException;
 
-    // Identity and ManagedAttribute helpers
-    sailpoint.object.Identity getIdentityById(String id) throws GeneralException;
-    String getManagedAttributeDescription(String sourceId, String name, String value, sailpoint.object.ManagedAttribute.Type type) throws GeneralException;
-    ManagedAttributeDetails getManagedAttributeDetails(String sourceId, String name, String value, sailpoint.object.ManagedAttribute.Type type) throws GeneralException;
+    boolean getAccountAttributeBool(Account account, String attribute);
 
-    // Raw attribute accessors (object form)
-    Object getRawAccountAttribute(Account account, String attribute) throws GeneralException;
-    Object getRawAccountAttribute(String applicationName, String nativeIdentity, String attribute) throws GeneralException;
+    int getAccountAttributeInt(String sourceId, String nativeIdentity, String attribute) throws GeneralException;
 
-    // Source attribute accessors
-    String getSourceAttributeBySourceId(String sourceId, String attributeName) throws GeneralException;
-    String getSourceAttributeBySourceName(String sourceName, String attributeName) throws GeneralException;
+    int getAccountAttributeInt(Account account, String attribute);
+
+    // Searchable account attributes
+    int attrSearchCountAccounts(List<String> sourceIds, String attributeName, String operation, List<String> values);
+
+    String attrSearchGetIdentityName(List<String> sourceIds, String attributeName, String operation,
+            List<String> values);
+
+    // Managed attributes
+    String getManagedAttributeDescription(String sourceId, String name, String value, ManagedAttribute.Type type)
+            throws GeneralException;
+
+    ManagedAttributeDetails getManagedAttributeDetails(String sourceId, String name, String value,
+            ManagedAttribute.Type type) throws GeneralException;
+
+    List<ManagedAttributeDetails> findManagedAttributes(String sourceId, String attributeName,
+            IdnRuleUtil.ManagedAttributeProperty property, IdnRuleUtil.FindOperation operation, String valueToMatch,
+            String entitlementType, IdnRuleUtil.ManagedAttributeProperty sortAttribute) throws GeneralException;
+
+    // Identities
+    Identity getIdentityById(String id);
+
+    List<Identity> findIdentitiesBySearchableIdentityAttribute(String attributeName, String operation, String value,
+            String sortAttribute);
+
+    int countIdentitiesBySearchableIdentityAttribute(String attributeName, String operation, String value);
 
     // Uniqueness checks
-    boolean isUniqueAccountId(String identityNameOrId, String applicationNameOrId, String accountId) throws GeneralException;
-    boolean isUniqueLDAPValue(String identityNameOrId, String applicationNameOrId, String attributeName, String attributeValue) throws GeneralException;
+    boolean isUniqueLDAPValue(String identityNameOrId, String applicationNameOrId, String attributeName,
+            String attributeValue);
 
-    /**
-     * Minimal Account contract used by this shim. Implementations wrap IIQ Link objects.
-     */
-    interface Account {
-        String getNativeIdentity();
-        String getDisplayableName();
-        Object getAttribute(String name);
-        Object getRawAttribute(String name);
-        String getApplicationName();
-        String getIdentityName(); // identity owner name (if known)
-    }
+    boolean isUniqueAccountId(String identityNameOrId, String applicationNameOrId, String accountId);
+
+    // Source attributes
+    String getSourceAttributeBySourceId(String sourceId, String attributeName) throws GeneralException;
+
+    String getSourceAttributeBySourceName(String sourceName, String attributeName) throws GeneralException;
+
+    // Utility helpers
+    String otoa(Object object);
+
+    boolean otob(Object object);
+
+    @SuppressWarnings("rawtypes")
+    List asList(Object object);
+
+    boolean nullSafeEq(Object o1, Object o2);
+
+    boolean nullSafeEq(Object o1, Object o2, boolean nullsEq);
+
+    boolean nullSafeCaseInsensitiveEq(String o1, String o2);
+
+    @SuppressWarnings("rawtypes")
+    <T extends Comparable> int nullSafeCompareTo(T o1, T o2);
+
+    String dateToString(Date src, String format);
+
+    String dateToString(Date src, String format, TimeZone tz);
 }
