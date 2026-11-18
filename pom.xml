@@ -41,5 +41,34 @@
         </dependency>
     </dependencies>
 
+    <build>
+        <plugins>
+            <!-- Keep real parameter names in the class files (instead of arg0, arg1...)
+                 so IDE autocomplete and reflection-based tools show them -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.11.0</version>
+                <configuration>
+                    <parameters>true</parameters>
+                </configuration>
+            </plugin>
+            <!-- Publish a -sources.jar alongside the main jar so IDEs can show
+                 javadoc and source for the library -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-source-plugin</artifactId>
+                <version>3.3.0</version>
+                <executions>
+                    <execution>
+                        <id>attach-sources</id>
+                        <goals>
+                            <goal>jar-no-fork</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 
 </project>
